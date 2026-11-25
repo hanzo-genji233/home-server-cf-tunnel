@@ -178,7 +178,7 @@ if (-not $NoAutostart) {
       if (Get-Service Cloudflared -ErrorAction SilentlyContinue) {
         # 已有服务：只有它本来就跑这份配置才改；跑的是别的隧道（面板 token 或别的配置）就停下，免得把它断开
         $img = (Get-ItemProperty $svcKey -Name ImagePath).ImagePath
-        if ($img -notlike "*$config*") {
+        if (-not $img -or -not $img.Contains($config)) {
           Die ("这台电脑已经有一个 Cloudflared 服务在跑别的隧道，改它会让那条隧道断开。`n" +
                "     它现在的启动命令：$img`n" +
                "     可选：① 去掉 -Service，用计划任务模式（推荐，两条隧道互不影响）；`n" +
