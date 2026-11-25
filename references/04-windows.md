@@ -11,6 +11,8 @@
 
 服务模式的原理（Cloudflare 官方文档的做法）：先 `cloudflared service install` 装出服务，再把注册表 `HKLM\SYSTEM\CurrentControlSet\Services\Cloudflared` 的 `ImagePath` 改成带 `--config <你的配置>` 的启动命令。脚本自动做这两步。
 
+如果电脑上**已经有**一个 Cloudflared 服务在跑别的隧道（比如面板 token 装的），脚本会停下、不改它，免得那条隧道断开。这时去掉 `-Service` 用计划任务模式即可，两条隧道互不影响。
+
 ## 2. 文件都在哪
 
 | 东西 | 位置 |

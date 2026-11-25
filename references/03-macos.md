@@ -20,7 +20,7 @@ launchctl print $U/com.cloudflared.home | grep -E 'state|pid|last exit'   # 状�
 launchctl kickstart -k $U/com.cloudflared.home                             # 重启隧道
 launchctl bootout $U/com.cloudflared.home                                  # 停用（重新启用用 bootstrap）
 tail -f ~/Library/Logs/cloudflared/home.log                                # 看日志
-curl -s 127.0.0.1:20241/metrics | grep ha_connections                      # 连接数，正常是 4
+curl -s 127.0.0.1:20241/metrics | grep ha_connections                      # 连接数，正常是 4（端口看 ~/.cloudflared/<name>.yml 的 metrics 行）
 ```
 
 改了 plist 要 `bootout` 再 `bootstrap`，`kickstart` 不会重新读 plist。改了 `.yml` 只要 `kickstart -k`。

@@ -13,6 +13,9 @@
 #   --no-watchdog     不装看门狗
 #   --no-dns          不自动建 DNS（域名不在登录授权的那个 zone 时，去面板手动加 CNAME）
 #   --ssh HOST        额外发布本机 SSH（HOST=ssh.example.com）。务必再配 Cloudflare Access，见 references/05
+#   --replace-hosts   不保留旧配置里的域名，只发布这次传入的（默认会保留旧域名，只增改这次传的）
+#
+# 环境变量：CF_METRICS_PORT 指定 metrics 端口（默认沿用旧配置；新隧道自动挑 20241 起没被占用的）
 #
 # 做的事：装 cloudflared → 浏览器登录一次 → 建隧道 → 写 ~/.cloudflared/<name>.yml
 #        → 校验 → 建 DNS 记录 → 装 LaunchAgent（不需要 sudo）→ 装看门狗 → 等隧道连上
@@ -21,8 +24,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=lib.sh
 source "$HERE/lib.sh"
 
-NAME=""; HOSTS=(); DRY=0; OVERWRITE=0; SERVICE=1; WATCHDOG=1; DNS=1; SSH_HOST=""
-METRICS_PORT="${CF_METRICS_PORT:-20241}"
+NAME=""; HOSTS=(); DRY=0; OVERWRITE=0; SERVICE=1; WATCHDOG=1; DNS=1; SSH_HOST=""; REPLACE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --name) NAME="$2"; shift 2 ;;
@@ -33,7 +35,8 @@ while [ $# -gt 0 ]; do
     --no-service) SERVICE=0; shift ;;
     --no-watchdog) WATCHDOG=0; shift ;;
     --no-dns) DNS=0; shift ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    --replace-hosts) REPLACE=1; shift ;;
+    -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
     *) die "不认识的参数：$1（--help 看用法）" ;;
   esac
 done
@@ -42,8 +45,9 @@ done
 [ ${#HOSTS[@]} -gt 0 ] || [ -n "$SSH_HOST" ] || die "至少要一个 --host 域名=本地地址"
 for h in "${HOSTS[@]:-}"; do
   [ -z "$h" ] && continue
-  [[ "$h" == *=http://* || "$h" == *=https://* ]] || die "--host 写成 域名=http://127.0.0.1:端口，收到的是：$h"
+  [[ "$h" =~ ^[A-Za-z0-9*.-]+=https?://[^[:space:]]+$ ]] || die "--host 写成 域名=http://127.0.0.1:端口（不能有空格），收到的是：$h"
 done
+[ -z "$SSH_HOST" ] || [[ "$SSH_HOST" =~ ^[A-Za-z0-9.-]+$ ]] || die "--ssh 只写域名，比如 ssh.example.com，收到的是：$SSH_HOST"
 
 CFDIR="$HOME/.cloudflared"
 CONFIG="$CFDIR/$NAME.yml"
@@ -54,6 +58,13 @@ WPLIST="$HOME/Library/LaunchAgents/$WLABEL.plist"
 # 日志不能放 ~/Documents、~/Desktop：launchd 没有权限写，会退出码 78
 LOGDIR="$HOME/Library/Logs/cloudflared"
 SHARE="$HOME/.local/share/cf-tunnel"
+CFG_TOOL="$HERE/cfg_tool.py"
+
+# metrics 端口：指定的 > 旧配置里的 > 自动挑一个没被别的隧道用的（多条隧道不能共用，否则看门狗会看错）
+METRICS_PORT="${CF_METRICS_PORT:-}"
+[ -n "$METRICS_PORT" ] || [ ! -f "$CONFIG" ] || METRICS_PORT="$(python3 "$CFG_TOOL" metrics "$CONFIG")"
+[ -n "$METRICS_PORT" ] || METRICS_PORT="$(python3 "$CFG_TOOL" freeport "$CFDIR" "$CONFIG")" || die "找不到空闲的 metrics 端口，用 CF_METRICS_PORT=端口 指定"
+[[ "$METRICS_PORT" =~ ^[0-9]+$ ]] || die "metrics 端口不对：$METRICS_PORT"
 
 run() { if [ "$DRY" = 1 ]; then printf '  [dry-run] %s\n' "$*"; else "$@"; fi; }
 
@@ -95,6 +106,20 @@ CRED="$CFDIR/$TID.json"
 [ "$DRY" = 1 ] || [ -f "$CRED" ] || die "找不到隧道凭据 $CRED。隧道可能是在别的电脑上建的：把那台的 $TID.json 拷过来，或换个 --name 新建"
 
 # ---------- 4. 配置文件 ----------
+# 重跑时默认保留旧配置里其他域名的规则，只增改这次传入的，避免已发布的站点被覆盖成 404
+NEW_NAMES=()
+for h in "${HOSTS[@]:-}"; do [ -n "$h" ] && NEW_NAMES+=("${h%%=*}"); done
+[ -n "$SSH_HOST" ] && NEW_NAMES+=("$SSH_HOST")
+KEPT=""
+if [ -f "$CONFIG" ]; then
+  OLD_HOSTS="$(python3 "$CFG_TOOL" hosts "$CONFIG" | grep -vxiF -f <(printf '%s\n' "${NEW_NAMES[@]}") || true)"
+  if [ "$REPLACE" = 1 ]; then
+    [ -n "$OLD_HOSTS" ] && warn "--replace-hosts：旧配置里这些域名会被去掉（DNS 记录还在，访问会变 404）：$(echo $OLD_HOSTS)"
+  else
+    KEPT="$(python3 "$CFG_TOOL" keep "$CONFIG" "${NEW_NAMES[@]}")"
+    [ -n "$OLD_HOSTS" ] && info "保留旧配置里的域名：$(echo $OLD_HOSTS)（不想要了加 --replace-hosts）"
+  fi
+fi
 gen_config() {
   echo "# 由 home-server-cf-tunnel/setup-tunnel.sh 生成于 $(date '+%Y-%m-%d %H:%M')。可以手改，改完重跑 doctor.sh"
   echo "tunnel: $TID"
@@ -116,6 +141,7 @@ gen_config() {
     echo "  - hostname: $SSH_HOST"
     echo "    service: ssh://127.0.0.1:22"
   fi
+  [ -z "$KEPT" ] || printf '%s\n' "$KEPT"
   echo "  # 最后一条必须是兜底：没匹配上的域名一律 404"
   echo "  - service: http_status:404"
 }

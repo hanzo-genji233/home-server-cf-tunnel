@@ -13,18 +13,23 @@
 #   -NoAutostart    不装开机自启
 #   -NoWatchdog     不装看门狗
 #   -SshHost        额外发布本机 SSH（如 ssh.example.com）。务必再配 Cloudflare Access，见 references/05
+#   -ReplaceHosts   不保留旧配置里的域名，只发布这次传入的（默认保留旧域名，只增改这次传的）
+#   -MetricsPort    指定 metrics 端口（默认沿用旧配置；新隧道自动挑 20241 起没被占用的）
 param(
   [Parameter(Mandatory = $true)][string]$Name,
   [string[]]$Hosts = @(),
   [string]$SshHost = '',
-  [switch]$DryRun, [switch]$OverwriteDns, [switch]$NoDns, [switch]$Service, [switch]$NoAutostart, [switch]$NoWatchdog,
-  [int]$MetricsPort = 20241
+  [switch]$DryRun, [switch]$OverwriteDns, [switch]$NoDns, [switch]$Service, [switch]$NoAutostart, [switch]$NoWatchdog, [switch]$ReplaceHosts,
+  [int]$MetricsPort = 0
 )
 . (Join-Path $PSScriptRoot 'lib.ps1')
 
+# powershell -File 不会把 "a","b" 拆成数组，会收到一整串 "a,b"：这里统一按逗号拆开
+$Hosts = @($Hosts | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 if ($Name -notmatch '^[A-Za-z0-9_-]+$') { Die '-Name 只能用字母、数字、- 和 _' }
 if ($Hosts.Count -eq 0 -and -not $SshHost) { Die '至少要一个 -Hosts "域名=http://127.0.0.1:端口"' }
-foreach ($h in $Hosts) { if ($h -notmatch '^[^=]+=https?://') { Die "-Hosts 写成 域名=http://127.0.0.1:端口，收到的是：$h" } }
+foreach ($h in $Hosts) { if ($h -notmatch '^[A-Za-z0-9*.-]+=https?://\S+$') { Die "-Hosts 写成 域名=http://127.0.0.1:端口（不能有空格），收到的是：$h" } }
+if ($SshHost -and $SshHost -notmatch '^[A-Za-z0-9.-]+$') { Die "-SshHost 只写域名，比如 ssh.example.com，收到的是：$SshHost" }
 if ($Service -and -not $DryRun) {
   $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
   if (-not $admin) { Die '-Service 需要管理员：右键 PowerShell → 以管理员身份运行，再执行一次' }
@@ -36,6 +41,47 @@ $share = Join-Path $env:LOCALAPPDATA 'cf-tunnel'
 $logDir = Join-Path $share 'logs'
 $taskName = "cloudflared-$Name"
 $watchName = "cloudflared-$Name-watchdog"
+
+function Get-MetricsPortOf([string]$path) {
+  if (-not (Test-Path $path)) { return 0 }
+  foreach ($l in (Get-Content -Encoding UTF8 $path)) { if ($l -match "^metrics:\s*['`"]?[^:'`"]*:(\d+)") { return [int]$Matches[1] } }
+  return 0
+}
+# 读旧配置的 ingress 规则：返回 @{Host=域名或空; Lines=原文行（缩进统一成 2 格）}，去掉最后的兜底规则
+function Get-IngressRules([string]$path) {
+  $rules = @(); if (-not (Test-Path $path)) { return $rules }
+  $lines = @(Get-Content -Encoding UTF8 $path); $in = $false; $ind = -1; $cur = $null
+  foreach ($l in $lines) {
+    if (-not $in) { if ($l -match '^ingress:\s*(#.*)?$') { $in = $true }; continue }
+    if ($l -match '^[^\s#]') { break }
+    if ($l -match '^(\s*)-(\s|$)' -and ($ind -lt 0 -or $Matches[1].Length -eq $ind)) {
+      $ind = $Matches[1].Length; $cur = @{ Host = $null; Lines = New-Object Collections.ArrayList }; $rules += $cur
+    }
+    if ($cur) { [void]$cur.Lines.Add($l) }
+  }
+  foreach ($r in $rules) {
+    while ($r.Lines.Count -and ($r.Lines[$r.Lines.Count - 1].Trim() -eq '' -or $r.Lines[$r.Lines.Count - 1].Trim().StartsWith('#'))) { $r.Lines.RemoveAt($r.Lines.Count - 1) }
+    foreach ($l in $r.Lines) {
+      $lead = $l.Length - $l.TrimStart().Length
+      if ($l -match "^\s*(?:-\s+)?hostname:\s*['`"]?([^'`"\s#]+)" -and ($l.TrimStart().StartsWith('-') -or $lead -eq $ind + 2)) { $r.Host = $Matches[1]; break }
+    }
+    $d = 2 - $ind
+    $r.Lines = @($r.Lines | ForEach-Object { if ($d -ge 0) { (' ' * $d) + $_ } else { $_ -replace "^ {0,$(-$d)}", '' } })
+  }
+  if ($rules.Count -and -not $rules[-1].Host) { $rules = @($rules | Select-Object -First ($rules.Count - 1)) }
+  return $rules
+}
+
+# metrics 端口：指定的 > 旧配置里的 > 自动挑一个没被别的隧道用、也没被监听的（多条隧道不能共用，否则看门狗会看错）
+if ($MetricsPort -le 0) { $MetricsPort = Get-MetricsPortOf $config }
+if ($MetricsPort -le 0) {
+  $used = @(Get-ChildItem -Path $cfDir -Filter *.yml -ErrorAction SilentlyContinue | Where-Object { $_.FullName -ne $config } | ForEach-Object { Get-MetricsPortOf $_.FullName })
+  foreach ($p in 20241..20299) {
+    if ($used -contains $p) { continue }
+    try { $t = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, $p); $t.Start(); $t.Stop(); $MetricsPort = $p; break } catch {}
+  }
+  if ($MetricsPort -le 0) { Die '找不到空闲的 metrics 端口，用 -MetricsPort 指定' }
+}
 
 function Run([string]$exe, [string[]]$a) {
   if ($DryRun) { Write-Host "  [dry-run] $exe $($a -join ' ')"; return }
@@ -88,6 +134,15 @@ foreach ($h in $Hosts) {
   $lines += "  - hostname: $host_"; $lines += "    service: $svc"; $allHosts += $host_
 }
 if ($SshHost) { $lines += "  - hostname: $SshHost"; $lines += '    service: ssh://127.0.0.1:22'; $allHosts += $SshHost }
+# 重跑时默认保留旧配置里其他域名的规则，只增改这次传入的，避免已发布的站点被覆盖成 404
+$old = @(Get-IngressRules $config | Where-Object { $_.Host -and ($allHosts -notcontains $_.Host) })
+$oldNoHost = @(Get-IngressRules $config | Where-Object { -not $_.Host })
+if ($ReplaceHosts) {
+  if ($old.Count) { Warn "-ReplaceHosts：旧配置里这些域名会被去掉（DNS 记录还在，访问会变 404）：$(($old | ForEach-Object { $_.Host }) -join ' ')" }
+} else {
+  foreach ($r in ($old + $oldNoHost)) { $lines += $r.Lines }
+  if ($old.Count) { Info "保留旧配置里的域名：$(($old | ForEach-Object { $_.Host }) -join ' ')（不想要了加 -ReplaceHosts）" }
+}
 $lines += '  # 最后一条必须是兜底：没匹配上的域名一律 404'
 $lines += '  - service: http_status:404'
 $yaml = ($lines -join "`r`n") + "`r`n"
@@ -119,9 +174,19 @@ if (-not $NoAutostart) {
   if ($Service) {
     if ($DryRun) { Info "将安装 Windows 服务 Cloudflared，并把启动参数改成：$runArgs" }
     else {
-      if (-not (Get-Service Cloudflared -ErrorAction SilentlyContinue)) { & $cf service install | Out-Host }
+      $svcKey = 'HKLM:\SYSTEM\CurrentControlSet\Services\Cloudflared'
+      if (Get-Service Cloudflared -ErrorAction SilentlyContinue) {
+        # 已有服务：只有它本来就跑这份配置才改；跑的是别的隧道（面板 token 或别的配置）就停下，免得把它断开
+        $img = (Get-ItemProperty $svcKey -Name ImagePath).ImagePath
+        if ($img -notlike "*$config*") {
+          Die ("这台电脑已经有一个 Cloudflared 服务在跑别的隧道，改它会让那条隧道断开。`n" +
+               "     它现在的启动命令：$img`n" +
+               "     可选：① 去掉 -Service，用计划任务模式（推荐，两条隧道互不影响）；`n" +
+               "           ② 确认旧隧道不要了：管理员 PowerShell 执行 sc.exe stop Cloudflared; sc.exe delete Cloudflared，再重跑本命令。")
+        }
+      } else { & $cf service install | Out-Host }
       # 官方文档做法：服务装好后改注册表 ImagePath，让它带上我们的配置文件
-      Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\Cloudflared' -Name ImagePath -Value "`"$cf`" $runArgs"
+      Set-ItemProperty $svcKey -Name ImagePath -Value "`"$cf`" $runArgs"
       Set-Service Cloudflared -StartupType Automatic
       Restart-Service Cloudflared -Force
       Ok 'Windows 服务 Cloudflared 已安装并启动（开机自动运行，不用登录）'

@@ -22,13 +22,16 @@ try {
     Set-Content -Path (Join-Path $work 'index.html') -Value $html -Encoding UTF8
     $server = @"
 `$h = New-Object Net.HttpListener; `$h.Prefixes.Add('http://127.0.0.1:$Port/'); `$h.Start()
-`$b = [IO.File]::ReadAllBytes('$work\index.html')
+`$b = [IO.File]::ReadAllBytes('$($work -replace "'", "''")\index.html')
 while (`$h.IsListening) { `$c = `$h.GetContext(); `$c.Response.ContentType = 'text/html; charset=utf-8'; `$c.Response.OutputStream.Write(`$b, 0, `$b.Length); `$c.Response.Close() }
 "@
     Set-Content -Path (Join-Path $work 'serve.ps1') -Value $server -Encoding UTF8
-    $demo = Start-Process powershell -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $work 'serve.ps1') -WindowStyle Hidden -PassThru
+    # 路径可能含空格（如 C:\Users\Jane Doe），整串参数自己加引号
+    $demo = Start-Process powershell -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $work 'serve.ps1')`"" -WindowStyle Hidden -PassThru
     $procs += $demo
-    Start-Sleep -Seconds 2
+    $up = $false
+    for ($i = 0; $i -lt 20 -and -not $up; $i++) { Start-Sleep -Milliseconds 500; $up = (Get-HttpCode "http://127.0.0.1:$Port/" 2) -eq 200 }
+    if (-not $up) { Die "演示页面没起来（http://127.0.0.1:$Port 无响应）。可以改用 -Port 发布你自己已有的服务" }
     Info "演示页面已在 http://127.0.0.1:$Port 启动"
   } elseif ((Get-HttpCode "http://127.0.0.1:$Port/" 3) -eq 0) {
     Warn "127.0.0.1:$Port 现在没有响应，网址会打开 502"

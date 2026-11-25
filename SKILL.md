@@ -73,7 +73,7 @@ powershell -ExecutionPolicy Bypass -File $SKILL\scripts\windows\setup-tunnel.ps1
 # add -Service (run as Administrator) to start before anyone logs in
 ```
 
-Re-running the script with a changed `--host` list is safe: it backs up the old config, rewrites it, adds missing DNS records and restarts the tunnel.
+Re-running is safe and additive: it backs up the old config, keeps the hostnames already in it, adds or updates only the `--host` entries you pass, adds missing DNS records and restarts the tunnel. To drop old hostnames, pass `--replace-hosts` (Windows: `-ReplaceHosts`). Each tunnel gets its own metrics port (kept from the old config, else the first free port from 20241), so the watchdog and doctor never read another tunnel.
 
 ## 4. Make the machine behave like a server
 
@@ -129,4 +129,5 @@ It checks: cloudflared installed, config valid, service running, live edge conne
 | `references/06-multi-service-caddy.md` | Path routing with Caddy |
 | `references/07-pitfalls.md` | Known problems and fixes |
 | `scripts/macos/*.sh`, `scripts/windows/*.ps1` | quick-try, setup-tunnel, doctor, watchdog |
+| `scripts/macos/cfg_tool.py` | read-only helper for setup-tunnel.sh: merge old ingress rules, pick a free metrics port |
 | `templates/` | `config.yml.example`, `Caddyfile.example` |
