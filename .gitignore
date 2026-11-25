@@ -1,0 +1,7 @@
+# 隧道凭据永远不要提交
+*.pem
+*.json.bak
+cert.pem
+*-token
+*.env
+.DS_Store

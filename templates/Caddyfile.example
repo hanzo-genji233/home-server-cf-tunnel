@@ -1,0 +1,27 @@
+# Caddy 路径分流示例：cloudflared → 127.0.0.1:8790 → 按路径去前缀转给不同服务
+# HTTPS 由 Cloudflare 负责，这里只跑 http、只听本机
+{
+	admin off
+	auto_https off
+}
+
+http://site.example.com:8790 {
+	bind 127.0.0.1
+	# /game1/xxx → 127.0.0.1:8787/xxx（handle_path 会去掉 /game1 前缀）
+	handle_path /game1/* {
+		reverse_proxy 127.0.0.1:8787
+	}
+	handle_path /game2/* {
+		reverse_proxy 127.0.0.1:8788
+	}
+	# 其余路径
+	handle {
+		reverse_proxy 127.0.0.1:8787
+	}
+}
+
+# 另一个子域名也可以交给同一个 Caddy
+http://notes.example.com:8790 {
+	bind 127.0.0.1
+	reverse_proxy 127.0.0.1:4000
+}

@@ -1,0 +1,30 @@
+# Cloudflare Tunnel 配置示例（setup-tunnel 脚本会自动生成同样格式的文件）
+# 位置：~/.cloudflared/<name>.yml（Windows：%USERPROFILE%\.cloudflared\<name>.yml，UTF-8 不带 BOM）
+tunnel: 00000000-0000-0000-0000-000000000000
+credentials-file: /Users/you/.cloudflared/00000000-0000-0000-0000-000000000000.json
+metrics: 127.0.0.1:20241        # 看门狗 / doctor 用来读连接数
+no-autoupdate: true
+protocol: auto                   # 网络挡 UDP 时改成 http2
+
+ingress:
+  # 子域名 → 本地服务
+  - hostname: blog.example.com
+    service: http://127.0.0.1:3000
+  - hostname: api.example.com
+    service: http://127.0.0.1:8080
+    originRequest:
+      connectTimeout: 10s
+  # 同一域名下多个路径 → 交给 Caddy 去前缀（见 Caddyfile.example）
+  - hostname: site.example.com
+    service: http://127.0.0.1:8790
+  # 只放行某些路径，其余 404（比如只公开文件下载接口，不公开管理后台）
+  - hostname: files.example.com
+    path: ^/download/[A-Za-z0-9_-]+$
+    service: http://127.0.0.1:9000
+  - hostname: files.example.com
+    service: http_status:404
+  # SSH（务必在 Cloudflare Access 里加登录保护，见 references/05）
+  - hostname: ssh.example.com
+    service: ssh://127.0.0.1:22
+  # 兜底，必须放最后
+  - service: http_status:404
