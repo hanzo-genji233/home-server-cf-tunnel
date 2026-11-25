@@ -73,7 +73,7 @@ powershell -ExecutionPolicy Bypass -File $SKILL\scripts\windows\setup-tunnel.ps1
 # add -Service (run as Administrator) to start before anyone logs in
 ```
 
-Re-running is safe and additive: it backs up the old config, keeps the hostnames already in it, adds or updates only the `--host` entries you pass, adds missing DNS records and restarts the tunnel. To drop old hostnames, pass `--replace-hosts` (Windows: `-ReplaceHosts`). Each tunnel gets its own metrics port (kept from the old config, else the first free port from 20241), so the watchdog and doctor never read another tunnel.
+Re-running is safe and additive: it backs up the old config, keeps the hostnames already in it, adds or updates only the `--host` entries you pass, adds missing DNS records and restarts the tunnel. To drop old hostnames, pass `--replace-hosts` (Windows: `-ReplaceHosts`). Each tunnel gets its own metrics port (kept from the old config, else the first free port from 20241), and a port another config already claims is swapped for a free one, so the watchdog and doctor read their own tunnel. Re-running with a `--host` that has path rules or several rules in the old config stops instead of making the whole site public.
 
 ## 4. Make the machine behave like a server
 

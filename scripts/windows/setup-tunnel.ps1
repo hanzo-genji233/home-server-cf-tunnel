@@ -41,6 +41,18 @@ $share = Join-Path $env:LOCALAPPDATA 'cf-tunnel'
 $logDir = Join-Path $share 'logs'
 $taskName = "cloudflared-$Name"
 $watchName = "cloudflared-$Name-watchdog"
+$svcKey = 'HKLM:\SYSTEM\CurrentControlSet\Services\Cloudflared'
+
+# -Service：已有 Cloudflared 服务时，只有它本来就跑这份配置才继续；跑的是别的隧道（面板 token 或别的配置）就在动手前停下，免得把它断开
+if ($Service -and -not $NoAutostart -and (Get-Service Cloudflared -ErrorAction SilentlyContinue)) {
+  $img = (Get-ItemProperty $svcKey -Name ImagePath -ErrorAction SilentlyContinue).ImagePath
+  if (-not $img -or -not $img.Contains($config)) {
+    Die ("这台电脑已经有一个 Cloudflared 服务在跑别的隧道，改它会让那条隧道断开。什么都没改。`n" +
+         "     它现在的启动命令：$img`n" +
+         "     可选：① 去掉 -Service，用计划任务模式（推荐，两条隧道互不影响）；`n" +
+         "           ② 确认旧隧道不要了：管理员 PowerShell 执行 sc.exe stop Cloudflared; sc.exe delete Cloudflared，再重跑本命令。")
+  }
+}
 
 function Get-MetricsPortOf([string]$path) {
   if (-not (Test-Path $path)) { return 0 }
@@ -73,7 +85,12 @@ function Get-IngressRules([string]$path) {
 }
 
 # metrics 端口：指定的 > 旧配置里的 > 自动挑一个没被别的隧道用、也没被监听的（多条隧道不能共用，否则看门狗会看错）
+$portGiven = $MetricsPort -gt 0
 if ($MetricsPort -le 0) { $MetricsPort = Get-MetricsPortOf $config }
+if ($MetricsPort -gt 0 -and -not $portGiven) {
+  $clash = @(Get-ChildItem -Path $cfDir -Filter *.yml -ErrorAction SilentlyContinue | Where-Object { $_.FullName -ne $config -and (Get-MetricsPortOf $_.FullName) -eq $MetricsPort } | ForEach-Object { $_.Name })
+  if ($clash.Count) { Warn "metrics 端口 $MetricsPort 也被 $($clash -join ' ') 用着，给 $Name 换一个"; $MetricsPort = 0 }
+}
 if ($MetricsPort -le 0) {
   $used = @(Get-ChildItem -Path $cfDir -Filter *.yml -ErrorAction SilentlyContinue | Where-Object { $_.FullName -ne $config } | ForEach-Object { Get-MetricsPortOf $_.FullName })
   foreach ($p in 20241..20299) {
@@ -135,6 +152,12 @@ foreach ($h in $Hosts) {
 }
 if ($SshHost) { $lines += "  - hostname: $SshHost"; $lines += '    service: ssh://127.0.0.1:22'; $allHosts += $SshHost }
 # 重跑时默认保留旧配置里其他域名的规则，只增改这次传入的，避免已发布的站点被覆盖成 404
+if (-not $ReplaceHosts) {
+  # 同一个域名在旧配置里有 path 限制或多条规则：整块替换会让整站公开，停下让人确认
+  $mine = @(Get-IngressRules $config | Where-Object { $_.Host -and ($allHosts -contains $_.Host) })
+  $special = @($mine | Group-Object { $_.Host.ToLower() } | Where-Object { $_.Count -gt 1 -or ($_.Group | Where-Object { ($_.Lines -join "`n") -match '(?m)^\s*(-\s+)?path:' }) } | ForEach-Object { $_.Name })
+  if ($special.Count) { Die "旧配置里 $($special -join ' ') 有路径限制或多条规则，这次传 -Hosts 会把它们换成一条普通规则（整站公开）。请直接改 $config 再跑 doctor.ps1；确定要整块替换就加 -ReplaceHosts" }
+}
 $old = @(Get-IngressRules $config | Where-Object { $_.Host -and ($allHosts -notcontains $_.Host) })
 $oldNoHost = @(Get-IngressRules $config | Where-Object { -not $_.Host })
 if ($ReplaceHosts) {
@@ -181,17 +204,7 @@ if (-not $NoAutostart) {
   if ($Service) {
     if ($DryRun) { Info "将安装 Windows 服务 Cloudflared，并把启动参数改成：$runArgs" }
     else {
-      $svcKey = 'HKLM:\SYSTEM\CurrentControlSet\Services\Cloudflared'
-      if (Get-Service Cloudflared -ErrorAction SilentlyContinue) {
-        # 已有服务：只有它本来就跑这份配置才改；跑的是别的隧道（面板 token 或别的配置）就停下，免得把它断开
-        $img = (Get-ItemProperty $svcKey -Name ImagePath).ImagePath
-        if (-not $img -or -not $img.Contains($config)) {
-          Die ("这台电脑已经有一个 Cloudflared 服务在跑别的隧道，改它会让那条隧道断开。`n" +
-               "     它现在的启动命令：$img`n" +
-               "     可选：① 去掉 -Service，用计划任务模式（推荐，两条隧道互不影响）；`n" +
-               "           ② 确认旧隧道不要了：管理员 PowerShell 执行 sc.exe stop Cloudflared; sc.exe delete Cloudflared，再重跑本命令。")
-        }
-      } else { & $cf service install | Out-Host }
+      if (-not (Get-Service Cloudflared -ErrorAction SilentlyContinue)) { & $cf service install | Out-Host }
       # 官方文档做法：服务装好后改注册表 ImagePath，让它带上我们的配置文件
       Set-ItemProperty $svcKey -Name ImagePath -Value "`"$cf`" $runArgs"
       Set-Service Cloudflared -StartupType Automatic

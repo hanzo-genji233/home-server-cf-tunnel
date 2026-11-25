@@ -36,7 +36,7 @@ while [ $# -gt 0 ]; do
     --no-watchdog) WATCHDOG=0; shift ;;
     --no-dns) DNS=0; shift ;;
     --replace-hosts) REPLACE=1; shift ;;
-    -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
     *) die "不认识的参数：$1（--help 看用法）" ;;
   esac
 done
@@ -59,10 +59,15 @@ WPLIST="$HOME/Library/LaunchAgents/$WLABEL.plist"
 LOGDIR="$HOME/Library/Logs/cloudflared"
 SHARE="$HOME/.local/share/cf-tunnel"
 CFG_TOOL="$HERE/cfg_tool.py"
+command -v python3 >/dev/null 2>&1 || die "需要 python3。在终端运行 xcode-select --install 装命令行工具，装完再跑"
 
 # metrics 端口：指定的 > 旧配置里的 > 自动挑一个没被别的隧道用的（多条隧道不能共用，否则看门狗会看错）
 METRICS_PORT="${CF_METRICS_PORT:-}"
 [ -n "$METRICS_PORT" ] || [ ! -f "$CONFIG" ] || METRICS_PORT="$(python3 "$CFG_TOOL" metrics "$CONFIG")"
+if [ -n "$METRICS_PORT" ] && [ -z "${CF_METRICS_PORT:-}" ]; then
+  clash="$(python3 "$CFG_TOOL" usedby "$CFDIR" "$CONFIG" "$METRICS_PORT")"
+  [ -z "$clash" ] || { warn "metrics 端口 $METRICS_PORT 也被 $(echo $clash) 用着，给 $NAME 换一个"; METRICS_PORT=""; }
+fi
 [ -n "$METRICS_PORT" ] || METRICS_PORT="$(python3 "$CFG_TOOL" freeport "$CFDIR" "$CONFIG")" || die "找不到空闲的 metrics 端口，用 CF_METRICS_PORT=端口 指定"
 [[ "$METRICS_PORT" =~ ^[0-9]+$ ]] || die "metrics 端口不对：$METRICS_PORT"
 
@@ -111,6 +116,11 @@ NEW_NAMES=()
 for h in "${HOSTS[@]:-}"; do [ -n "$h" ] && NEW_NAMES+=("${h%%=*}"); done
 [ -n "$SSH_HOST" ] && NEW_NAMES+=("$SSH_HOST")
 KEPT=""
+if [ -f "$CONFIG" ] && [ "$REPLACE" = 0 ]; then
+  # 同一个域名在旧配置里有 path 限制或多条规则（比如只放行某个路径、其余 404）：整块替换会让整站公开，停下让人确认
+  special="$(python3 "$CFG_TOOL" special "$CONFIG" "${NEW_NAMES[@]}")"
+  [ -z "$special" ] || die "旧配置里 $(echo $special) 有路径限制或多条规则，这次传 --host 会把它们换成一条普通规则（整站公开）。请直接改 $CONFIG 再重跑 doctor.sh；确定要整块替换就加 --replace-hosts"
+fi
 if [ -f "$CONFIG" ]; then
   OLD_HOSTS="$(python3 "$CFG_TOOL" hosts "$CONFIG" | grep -vxiF -f <(printf '%s\n' "${NEW_NAMES[@]}") || true)"
   if [ "$REPLACE" = 1 ]; then

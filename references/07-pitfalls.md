@@ -5,7 +5,7 @@
 ## 1. 网站打开是 530 / 1033，但 cloudflared 进程明明在跑
 
 - **原因**：cloudflared 和 Cloudflare 边缘断开后，偶尔卡住不重连。进程活着，launchd / 计划任务都觉得没问题，实际 0 条连接。
-- **判断**：`curl -s 127.0.0.1:20241/metrics | grep ha_connections`，值为 0。
+- **判断**：`curl -s 127.0.0.1:<端口>/metrics | grep ha_connections`，值为 0。端口看 `~/.cloudflared/<name>.yml` 的 `metrics:` 行（Windows 在 `%USERPROFILE%\.cloudflared\`）。
 - **解决**：重启隧道（macOS `launchctl kickstart -k gui/$(id -u)/com.cloudflared.<name>`）。长期解决靠看门狗：`setup-tunnel` 默认装好，每分钟检查，连续 3 次 0 条连接就自动重启。
 
 ## 2. 502 Bad Gateway

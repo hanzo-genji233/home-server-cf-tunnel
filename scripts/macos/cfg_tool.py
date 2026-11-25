@@ -5,6 +5,8 @@
                                         (re-indented to 2 spaces, catch-all dropped)
   cfg_tool.py hosts CONFIG             print hostnames in the old ingress, one per line
   cfg_tool.py metrics CONFIG           print the metrics port of CONFIG (empty if none)
+  cfg_tool.py special CONFIG [HOST ...]  print each HOST that has path rules or several rules in CONFIG
+  cfg_tool.py usedby DIR SELF PORT     print other DIR/*.yml files whose metrics line uses PORT
   cfg_tool.py freeport DIR [SELF]      print the first port from 20241 not used by any
                                         DIR/*.yml metrics line (except SELF) and not listening
 """
@@ -69,6 +71,26 @@ def main():
             delta = 2 - ind
             for l in block:
                 print((" " * delta + l) if delta >= 0 else re.sub(r"^ {0,%d}" % -delta, "", l))
+    elif cmd == "special":
+        rs, _ = rules(read(args[0]))
+        want = {h.lower() for h in args[1:]}
+        seen = {}
+        for host, block in rs:
+            if host and host.lower() in want:
+                n, has_path = seen.get(host.lower(), (0, False))
+                seen[host.lower()] = (n + 1, has_path or any(re.match(r"^\s*(-\s+)?path:", l) for l in block))
+        for h, (n, has_path) in seen.items():
+            if n > 1 or has_path:
+                print(h)
+    elif cmd == "usedby":
+        me = os.path.abspath(args[1])
+        for f in sorted(glob.glob(os.path.join(args[0], "*.yml"))):
+            if os.path.abspath(f) == me:
+                continue
+            for l in read(f):
+                m = re.match(r"^metrics:\s*['\"]?[^:'\"]*:(\d+)", l)
+                if m and m.group(1) == args[2]:
+                    print(os.path.basename(f))
     elif cmd == "metrics":
         for l in read(args[0]):
             m = re.match(r"^metrics:\s*['\"]?[^:'\"]*:(\d+)", l)
