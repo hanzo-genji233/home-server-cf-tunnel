@@ -163,7 +163,14 @@ foreach ($h in $allHosts) {
   $a = @('tunnel', 'route', 'dns'); if ($OverwriteDns) { $a += '--overwrite-dns' }; $a += @($Name, $h)
   if ($DryRun) { Run $cf $a; continue }
   $out = & $cf @a 2>&1 | Out-String
-  if ($LASTEXITCODE -eq 0) { Ok "DNS：$h → 隧道 $Name"; ($out -split "`n" | Select-String 'Added CNAME') | ForEach-Object { Write-Host "    $_" } }
+  if ($LASTEXITCODE -eq 0) {
+    # cloudflared 只认登录时选的那个 zone；别的域名会被拼成 host.<那个zone>，必须核对
+    $added = if ($out -match 'Added CNAME (\S+)') { $Matches[1].TrimEnd('.') } else { $null }
+    if ($added -and $added -ne $h) {
+      Warn "DNS：建成了 $added，不是 $h。原因：$h 不在登录时授权的那个域名（zone）里"
+      Warn "  修法：到 Cloudflare 面板删掉 $added，再给 $h 手动加 CNAME → $tid.cfargotunnel.com（开小黄云）；或删掉 $cfDir\cert.pem 重跑，登录时选 $h 所在的域名"
+    } else { Ok "DNS：$h → 隧道 $Name" }
+  }
   elseif ($out -match 'already exists') { Warn "DNS：$h 已有记录。若它指向旧服务器，加 -OverwriteDns 重跑；若已指向本隧道，可忽略" }
   else { Warn "DNS：$h 自动创建失败（$($out.Trim() -split "`n" | Select-Object -Last 1)）。到 Cloudflare 面板手动加 CNAME：$h → $tid.cfargotunnel.com" }
 }

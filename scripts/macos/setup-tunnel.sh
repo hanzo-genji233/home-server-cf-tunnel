@@ -165,9 +165,15 @@ for host in "${ALL_HOSTS[@]}"; do
   args=(tunnel route dns); [ "$OVERWRITE" = 1 ] && args+=(--overwrite-dns)
   if [ "$DRY" = 1 ]; then run "$CF" "${args[@]}" "$NAME" "$host"; continue; fi
   if out="$("$CF" "${args[@]}" "$NAME" "$host" 2>&1)"; then
-    ok "DNS：$host → 隧道 $NAME"
-    # cloudflared 只认登录时选的那个 zone；别的域名会被拼成 host.<那个zone>，要看清楚
-    grep -Eo 'Added CNAME [^ ]+' <<<"$out" | sed 's/^/    /' >&2 || true
+    # cloudflared 只认登录时选的那个 zone；别的域名会被拼成 host.<那个zone>，必须核对
+    added="$(grep -Eo 'Added CNAME [^ ]+' <<<"$out" | awk '{print $3}' | sed 's/\.$//' || true)"
+    if [ -n "$added" ] && [ "$added" != "$host" ]; then
+      warn "DNS：建成了 $added，不是 $host。原因：$host 不在登录时授权的那个域名（zone）里"
+      warn "  修法：到 Cloudflare 面板删掉 $added，再给 $host 手动加 CNAME → $TID.cfargotunnel.com（开小黄云）；"
+      warn "  或者删掉 $CFDIR/cert.pem 重跑本脚本，登录时选 $host 所在的域名"
+    else
+      ok "DNS：$host → 隧道 $NAME"
+    fi
   elif grep -qi "already exists" <<<"$out"; then
     warn "DNS：$host 已有记录。若它指向旧服务器，加 --overwrite-dns 重跑；若已指向本隧道，可忽略"
   else
@@ -211,8 +217,11 @@ plist_watchdog() { cat <<XML
 XML
 }
 reload() { # $1 label  $2 plist
-  launchctl bootout "gui/$(id -u)/$1" 2>/dev/null || true
-  launchctl bootstrap "gui/$(id -u)" "$2"
+  local d="gui/$(id -u)" i
+  launchctl bootout "$d/$1" 2>/dev/null || true
+  # bootout 是异步的：没卸载完就 bootstrap 会报 "5: Input/output error"，先等它真的消失
+  for i in $(seq 1 20); do launchctl print "$d/$1" >/dev/null 2>&1 || break; sleep 0.5; done
+  launchctl bootstrap "$d" "$2" 2>/dev/null || { sleep 2; launchctl bootstrap "$d" "$2"; }
 }
 
 if [ "$SERVICE" = 1 ]; then
@@ -245,7 +254,8 @@ if [ "$SERVICE" = 1 ]; then
   info "等隧道连上 Cloudflare…"
   ha=0
   for _ in $(seq 1 30); do
-    ha="$(curl -s --max-time 2 "http://127.0.0.1:$METRICS_PORT/metrics" | awk '/^cloudflared_tunnel_ha_connections /{print int($2)}')"
+    # 刚启动时 metrics 还没监听，curl 会失败；|| true 防止 set -e 让脚本在这里悄悄退出
+    ha="$(curl -s --max-time 2 "http://127.0.0.1:$METRICS_PORT/metrics" 2>/dev/null | awk '/^cloudflared_tunnel_ha_connections /{print int($2)}' || true)"
     [ "${ha:-0}" -gt 0 ] && break; sleep 2
   done
   if [ "${ha:-0}" -gt 0 ]; then ok "隧道已连上：$ha 条边缘连接"; else warn "60 秒内没连上，看日志：tail -50 $LOGDIR/$NAME.log"; fi
